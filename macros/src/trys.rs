@@ -1,6 +1,6 @@
 use syn::{parse_quote, visit_mut::VisitMut, Expr, ExprBlock};
 
-pub fn replace_trys(blocks: &mut Vec<ExprBlock>) {
+pub fn desugar_trys(blocks: &mut Vec<ExprBlock>) {
     let mut replacer = TryReplacer { try_level: 0 };
     blocks.iter_mut().for_each(|block| {
         replacer.visit_expr_block_mut(block);
@@ -26,8 +26,8 @@ impl VisitMut for TryReplacer {
             if self.try_level == 0 {
                 let e = &*t.expr;
                 *i = parse_quote!((match ::enjoin::polyfill::Try::branch(#e) {
-                    ::core::ops::ControlFlow::Break(b) => return ::enjoin::polyfill::FromResidual::from_residual(b),
-                    ::core::ops::ControlFlow::Continue(c) => c
+                    ::core::ops::ControlFlow::Break (b) => return ::enjoin::polyfill::FromResidual::from_residual(b),
+                    ::core::ops::ControlFlow::Continue (c) => c
                 }));
             }
         }

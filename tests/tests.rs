@@ -1,51 +1,41 @@
-use enjoin::enjoin;
-use futures::Future;
+use enjoin::join;
 
-struct YieldOnce(bool);
-impl YieldOnce {
-    fn new() -> Self {
-        Self(false)
-    }
-}
-
-impl Future for YieldOnce {
-    type Output = ();
-
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        let this = self.get_mut();
-        if this.0 {
-            std::task::Poll::Ready(())
-        } else {
-            this.0 = true;
-            cx.waker().wake_by_ref();
-            std::task::Poll::Pending
-        }
-    }
-}
-
-struct NotCopy(i32);
-impl NotCopy {
-    fn add(&mut self, other: i32) {
-        self.0 += other;
-    }
-}
+mod utils;
+use utils::{NotCopy, YieldOnce};
 
 #[pollster::test]
 async fn one() {
     let mut data = 1;
-    enjoin!({
-        data += 1;
-    },);
+    let x = 'a: {
+        join!({
+            data += 1;
+            break 'a 4;
+        });
+        3
+    };
+    assert_eq!(x, 4);
     assert_eq!(data, 2);
+}
+
+#[pollster::test]
+async fn questionmark() {
+    async fn inner() -> Result<i32, &'static str> {
+        join!({
+            Ok(7)?;
+            Err("haha")?;
+            Ok(6)?;
+            Ok(3)
+        })
+        .0
+    }
+    let res = inner().await;
+    assert_eq!(res, Err("haha"));
 }
 
 #[pollster::test]
 async fn not_copy() {
     let mut data = NotCopy(1);
-    enjoin!(
+    join!(
         {
             data.add(5);
         },
@@ -59,7 +49,7 @@ async fn not_copy() {
 #[pollster::test]
 async fn two() {
     let mut data = 1;
-    enjoin!(
+    join!(
         {
             data += 1;
         },
@@ -74,7 +64,7 @@ async fn two() {
 async fn disjoint_tuple() {
     let mut data = (2, 3);
     let borrow = &data.1;
-    enjoin!(
+    join!(
         {
             data.0 += 1;
         },
@@ -89,7 +79,7 @@ async fn disjoint_tuple() {
 #[pollster::test]
 async fn disjoint_tuple_nested() {
     let mut data = (2, (3, 4), ("asdf", (1, 7)));
-    enjoin!(
+    join!(
         {
             data.2 .1 .1 += 1;
         },
@@ -106,7 +96,7 @@ async fn disjoint_tuple_nested() {
 // async fn compile_fail_1() {
 // 	let mut data = 1;
 // 	let borrow = &data;
-// 	enjoin!(
+// 	join!(
 // 		{
 // 			data += 1;
 // 		}
@@ -117,7 +107,7 @@ async fn disjoint_tuple_nested() {
 #[pollster::test]
 async fn has_loop() {
     let mut shared = 0;
-    enjoin! {
+    join! {
         {
             for _ in 0..5 {
                 shared += 1;
