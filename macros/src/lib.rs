@@ -154,7 +154,7 @@ impl MacroInput {
                 if #num_left == 0 {
                     ::core::task::Poll::Ready (
                         #output_type :: #keep_ty (
-                            (#(::core::option::Option::unwrap(#outputs . #indices),)*)
+                            (#(::core::option::Option::unwrap(::core::option::Option::take(&mut #outputs . #indices)),)*)
                         )
                     )
                 }
