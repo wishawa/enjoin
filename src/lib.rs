@@ -1,8 +1,6 @@
 pub use enjoin_macro::join;
 
-pub mod for_macro_only {
-    pub use futures;
-}
+pub mod for_macro_only {}
 
 pub mod polyfill {
     //! Polyfill for the rust Try (and related) trait that is currently unstable.

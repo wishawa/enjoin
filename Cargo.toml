@@ -6,7 +6,6 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-futures = "0.3"
 enjoin_macro = { version = "0.1", path = "./macros/" }
 
 [dev-dependencies]
@@ -14,5 +13,6 @@ pollster = { version = "0.3.0", features = ["macro"] }
 
 [workspace]
 members = [
-	"macros/"
+	"macros/",
+	"tests/compile-fail-tests/"
 ]
