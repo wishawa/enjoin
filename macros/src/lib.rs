@@ -9,8 +9,7 @@ use breaks::{BreakReplacer, Escape};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::{
-    parse::Parse, parse_macro_input, parse_quote, punctuated::Punctuated, ExprBlock, Ident,
-     Token,
+    parse::Parse, parse_macro_input, parse_quote, punctuated::Punctuated, ExprBlock, Ident, Token,
 };
 
 #[proc_macro]
@@ -109,11 +108,12 @@ impl MacroInput {
                 }
             }
         );
+
         let br_labels = replacer
             .found
             .iter()
             .filter_map(|(escape, _ident)| match escape {
-                Escape::Break(label) =>Some(label),
+                Escape::Break(label) => Some(label),
                 _ => None,
             });
         let co_labels = replacer

@@ -97,7 +97,7 @@ pub fn replace_captures_and_generate_borrows(
             let index = syn::Index::from(idx);
             locs.iter().map(move |&loc| {
                 (
-                    loc as *const syn::Expr,
+                    loc as *const syn::Expr as usize,
                     parse_quote!( (* #borrows_tuple_name . #index) ),
                 )
             })
@@ -178,7 +178,7 @@ fn get_capture_field(i: &syn::Expr, locals: &Locals) -> Option<Capture> {
                 None
             }
         }
-        Expr::Field(f) => get_capture_field(i, locals).map(|mut c| {
+        Expr::Field(f) => get_capture_field(&*f.base, locals).map(|mut c| {
             c.members.push(CaptureMember {
                 member: f.member.to_owned(),
             });
@@ -310,8 +310,7 @@ impl<'ast> Visit<'ast> for CaptureFinder<'ast> {
                 return;
             }
         };
-        if let Some(mut capt) = get_capture_field(ex, &self.locals) {
-            capt.members.reverse();
+        if let Some(capt) = get_capture_field(ex, &self.locals) {
             match self.found.entry(capt) {
                 std::collections::hash_map::Entry::Occupied(mut occ) => {
                     occ.get_mut().0 &= immut;
@@ -328,13 +327,13 @@ impl<'ast> Visit<'ast> for CaptureFinder<'ast> {
 }
 
 struct CaptureReplacer {
-    replacements: HashMap<*const syn::Expr, syn::Expr>,
+    replacements: HashMap<usize, syn::Expr>,
 }
 
 impl VisitMut for CaptureReplacer {
     fn visit_expr_mut(&mut self, i: &mut Expr) {
         syn::visit_mut::visit_expr_mut(self, i);
-        if let Some(rep) = self.replacements.remove(&(i as _)) {
+        if let Some(rep) = self.replacements.remove(&(i as *const _ as usize)) {
             *i = rep;
         }
     }
