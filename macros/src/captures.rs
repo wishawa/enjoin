@@ -11,7 +11,7 @@ pub fn replace_captures_and_generate_borrows(
     blocks: &mut Vec<ExprBlock>,
     borrows_tuple_name: &Ident,
     borrows_cell_name: &Ident,
-) -> TokenStream {
+) -> Option<TokenStream> {
     // Visit all the blocks we want to join, figuring out which captures what.
     let mut block_captures = blocks
         .iter_mut()
@@ -99,11 +99,15 @@ pub fn replace_captures_and_generate_borrows(
 
     let borrows = names.iter().map(|name| &name.expr);
 
-    quote!(
-        let #borrows_cell_name = ::std::cell::RefCell::new((
-            #(&mut #borrows ,)*
-        ));
-    )
+    if !names.is_empty() {
+        Some(quote!(
+            let #borrows_cell_name = ::std::cell::RefCell::new((
+                #(&mut #borrows ,)*
+            ));
+        ))
+    } else {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -196,22 +200,28 @@ fn get_capture(i: &Expr, locals: &Locals) -> Option<Capture> {
     }
     match i {
         Expr::Path(_) | Expr::Field(_) | Expr::Reference(_) => {
-            let mut capt = get_capture_inner(i, locals)?;
-            capt.expr = Some(i.clone());
-            let mut out = Capture {
-                name: capt,
-                mutability: CaptureMutability::Unknown,
-            };
+            let mutability;
+            let inner_expr;
             match i {
                 Expr::Reference(r) => {
-                    out.mutability = if r.mutability.is_some() {
+                    inner_expr = &*r.expr;
+                    mutability = if r.mutability.is_some() {
                         CaptureMutability::Mutable
                     } else {
                         CaptureMutability::Immutable
                     };
                 }
-                _ => {}
+                _ => {
+                    inner_expr = i;
+                    mutability = CaptureMutability::Unknown;
+                }
             }
+            let mut capt = get_capture_inner(inner_expr, locals)?;
+            capt.expr = Some(inner_expr.clone());
+            let out = Capture {
+                name: capt,
+                mutability,
+            };
             Some(out)
         }
         _ => None,

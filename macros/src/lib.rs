@@ -128,7 +128,9 @@ impl MacroInput {
                 _ => None,
             });
 
-        awaits::replace_awaits(&mut blocks, &borrows_tuple, &borrows_cell);
+        if borrows.is_some() {
+            awaits::replace_awaits(&mut blocks, &borrows_tuple, &borrows_cell);
+        }
 
         let poll_cx = format_ident!("{}_poll_cx", private_ident);
         let pinned_futs = format_ident!("{}_pinned_futs", private_ident);

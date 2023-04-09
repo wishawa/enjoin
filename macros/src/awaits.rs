@@ -14,7 +14,7 @@ pub fn replace_awaits(
         replacer.visit_expr_block_mut(block);
         block.block.stmts.insert(
             0,
-            parse_quote!(let mut #borrows_tuple_name = #borrows_cell_name.borrow_mut();),
+            parse_quote!(let mut #borrows_tuple_name = ::std::cell::RefCell::borrow_mut(&#borrows_cell_name);),
         );
     });
 }
@@ -36,9 +36,9 @@ impl<'a> VisitMut for AwaitReplacer<'a> {
                 (
                     (
                         #base,
-                        {core::mem::drop( #borrows_name );},
+                        {::core::mem::drop( #borrows_name );},
                     ).0.await,
-                    {#borrows_name = #borrows_cell_name . borrow_mut();}
+                    {#borrows_name = ::std::cell::RefCell::borrow_mut(&#borrows_cell_name);}
                 ).0
             );
         } else {
