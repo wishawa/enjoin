@@ -1,11 +1,12 @@
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     hash::Hash,
 };
 
-use proc_macro2::{Ident, Span, TokenStream};
+use proc_macro2::{Ident, TokenStream};
 use quote::quote;
-use syn::{parse_quote, visit::Visit, visit_mut::VisitMut, Expr, ExprBlock};
+use syn::{parse_quote, visit::Visit, visit_mut::VisitMut, Expr, ExprBlock, Member};
 
 pub fn replace_captures_and_generate_borrows(
     blocks: &mut Vec<ExprBlock>,
@@ -13,293 +14,184 @@ pub fn replace_captures_and_generate_borrows(
     borrows_cell_name: &Ident,
 ) -> Option<TokenStream> {
     // Visit all the blocks we want to join, figuring out which captures what.
-    let mut block_captures = blocks
+    let block_captures = blocks
         .iter_mut()
         .map(|block| {
-            let mut captures = HashMap::<CaptureName, CaptureMutability>::new();
-            let mut collector = CaptureVisitor {
+            let mut collector = CaptureFinder {
                 locals: Locals::default(),
-                do_on_expr: |i: &mut Expr, locals: &mut Locals| -> bool {
-                    use CaptureMutability::*;
-                    if let Some(capt) = get_capture(i, locals) {
-                        match captures.entry(capt.name) {
-                            std::collections::hash_map::Entry::Occupied(mut occ) => {
-                                *occ.get_mut() = occ.get().merge(capt.mutability);
-                            }
-                            std::collections::hash_map::Entry::Vacant(vac) => {
-                                vac.insert(match capt.mutability {
-                                    Immutable => Immutable,
-                                    _ => Unknown,
-                                });
-                            }
-                        }
-                        true
-                    } else {
-                        false
-                    }
-                },
+                found: HashMap::new(),
             };
-            collector.visit_expr_block_mut(block);
-            captures
+            collector.visit_expr_block(block);
+            collector.found
         })
         .collect::<Vec<_>>();
 
     // Gather all the captured variables together.
-    let mut all_captures = block_captures.iter().fold(
+    let mut all_captures = block_captures.into_iter().fold(
         HashMap::new(),
-        |mut h: HashMap<CaptureName, (CaptureMutability, Vec<usize>)>, item| {
-            item.iter()
-                .enumerate()
-                .for_each(|(block_num, (name, mutability))| {
-                    if let Some((ex_mut, ex_nums)) = h.get_mut(name) {
-                        ex_nums.push(block_num);
-                        *ex_mut = ex_mut.merge(*mutability);
-                    } else {
-                        h.insert(name.to_owned(), (*mutability, vec![block_num]));
+        |mut h: HashMap<Capture, (bool, Vec<&syn::Expr>)>, item| {
+            item.into_iter()
+                .for_each(|(name, (immutable, locations))| match h.entry(name) {
+                    std::collections::hash_map::Entry::Occupied(mut occ) => {
+                        occ.get_mut().0 &= immutable;
+                        occ.get_mut().1.extend(locations);
+                    }
+                    std::collections::hash_map::Entry::Vacant(vac) => {
+                        vac.insert((immutable, locations));
                     }
                 });
             h
         },
     );
+
     // Filter for ones that are captured by at least 2 blocks and not known to be immutable.
     // These are the ones we need to wrap in cells.
-    all_captures.retain(|_, (mutability, nums)| {
-        *mutability == CaptureMutability::Unknown && nums.len() > 1
-    });
+    all_captures.retain(|_, (immutable, all_locations)| !*immutable && all_locations.len() > 1);
 
-    // Remove the captures that we don't need to wrap.
-    block_captures
+    let mut names = Vec::new();
+    let mut all_captures = all_captures
         .iter_mut()
-        .for_each(|block| block.retain(|k, _| all_captures.contains_key(k)));
+        .map(|(capt, (_imm, locs))| {
+            names.push(capt);
+            (capt, core::mem::take(locs))
+        })
+        .collect::<HashMap<_, _>>();
 
-    let mut names = all_captures.keys().collect::<Vec<_>>();
     names.sort();
+    let mut temp_buf = Vec::new();
     for sp in (1..names.len()).rev() {
         let (anc, des) = names.split_at(sp);
         let anc = anc.last().unwrap();
-        let des = des.first().unwrap();
-        if des.ident == anc.ident && des.members.starts_with(&anc.members) {
+        let dsc = des.first().unwrap();
+        if dsc.root == anc.root && dsc.members.starts_with(&anc.members) {
+            let depth_dif = dsc.members.len() - anc.members.len();
+            temp_buf.extend(
+                all_captures
+                    .remove(*dsc)
+                    .unwrap()
+                    .into_iter()
+                    .map(|ex| access_field(ex, depth_dif)),
+            );
+            all_captures
+                .get_mut(*anc)
+                .unwrap()
+                .extend(temp_buf.drain(..));
             names.swap_remove(sp);
         }
     }
-    let replacements = names
+
+    let all_captures = all_captures.into_iter().collect::<Vec<_>>();
+
+    let borrows = all_captures
+        .iter()
+        .map(|(Capture { root, members }, _locs)| {
+            let members = members.iter().map(|m| &m.member);
+            let b: syn::Expr = parse_quote!( #root #( . #members )* );
+            b
+        });
+
+    let replacements = all_captures
         .iter()
         .enumerate()
-        .map(|(idx, &name)| (name, idx as u32))
-        .collect();
-    let mut capture_replacer = CaptureVisitor {
-        locals: Locals::default(),
-        do_on_expr: |i: &mut Expr, locals: &mut Locals| -> bool {
-            replace_capture(i, locals, &replacements, &borrows_tuple_name)
-        },
-    };
-    blocks.iter_mut().for_each(|block| {
-        capture_replacer.visit_expr_block_mut(block);
-    });
+        .flat_map(|(idx, (_capt, locs))| {
+            let index = syn::Index::from(idx);
+            locs.iter().map(move |&loc| {
+                (
+                    loc as *const syn::Expr,
+                    parse_quote!( (* #borrows_tuple_name . #index) ),
+                )
+            })
+        })
+        .collect::<HashMap<_, _>>();
 
-    let borrows = names.iter().map(|name| &name.expr);
+    let mut replacer = CaptureReplacer { replacements };
 
     if !names.is_empty() {
-        Some(quote!(
+        let out = quote!(
             let #borrows_cell_name = ::std::cell::RefCell::new((
                 #(&mut #borrows ,)*
             ));
-        ))
+        );
+        blocks.iter_mut().for_each(|block| {
+            replacer.visit_expr_block_mut(block);
+        });
+        Some(out)
     } else {
         None
     }
 }
 
-#[derive(Clone)]
-struct CaptureName {
-    ident: String,
-    members: Vec<String>,
-    expr: Option<Expr>,
-}
-impl PartialEq for CaptureName {
-    fn eq(&self, other: &Self) -> bool {
-        self.ident == other.ident && self.members == other.members
-    }
-}
-impl Eq for CaptureName {}
-impl Hash for CaptureName {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.ident.hash(state);
-        self.members.hash(state);
-    }
-}
-impl PartialOrd for CaptureName {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        match self.ident.partial_cmp(&other.ident) {
-            Some(core::cmp::Ordering::Equal) => {}
-            ord => return ord,
+fn access_field(ex: &syn::Expr, depth: usize) -> &syn::Expr {
+    if depth == 0 {
+        ex
+    } else {
+        match ex {
+            Expr::Field(f) => access_field(&*f.base, depth - 1),
+            _ => panic!("no field to access"),
         }
-        self.members.partial_cmp(&other.members)
-    }
-}
-impl Ord for CaptureName {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
-fn member_to_string(m: &syn::Member) -> String {
-    match m {
-        syn::Member::Named(n) => n.to_string(),
-        syn::Member::Unnamed(u) => u.index.to_string(),
-    }
-}
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CaptureMutability {
-    Unknown,
-    Immutable,
-    Mutable,
-}
-impl CaptureMutability {
-    fn merge(self, other: Self) -> Self {
-        use CaptureMutability::*;
-        match (self, other) {
-            (Immutable, Immutable) => Immutable,
-            _ => Unknown,
-        }
-    }
-}
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Capture {
-    name: CaptureName,
-    mutability: CaptureMutability,
+    root: Ident,
+    members: Vec<CaptureMember>,
 }
 
-fn get_capture(i: &Expr, locals: &Locals) -> Option<Capture> {
-    fn get_capture_inner<'i>(i: &'i syn::Expr, locals: &Locals) -> Option<CaptureName> {
-        match i {
-            Expr::Path(p) if p.path.segments.len() == 1 => {
-                if let Some(syn::PathSegment {
-                    arguments: syn::PathArguments::None,
-                    ident,
-                }) = p.path.segments.first()
-                {
-                    let s = ident.to_string();
-                    (!s.chars().next().unwrap().is_ascii_uppercase() && !locals.contains(&s)).then(
-                        || CaptureName {
-                            ident: ident.to_string(),
-                            members: Vec::new(),
-                            expr: None,
-                        },
-                    )
-                } else {
-                    None
-                }
-            }
-            Expr::Field(f) => get_capture_inner(&f.base, locals).map(|mut c| {
-                c.members.push(member_to_string(&f.member));
-                c
-            }),
-            _ => None,
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct CaptureMember {
+    member: Member,
+}
+
+impl PartialOrd for CaptureMember {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (&self.member, &other.member) {
+            (Member::Named(this), Member::Named(other)) => this.partial_cmp(other),
+            (Member::Named(_), Member::Unnamed(_)) => Some(Ordering::Greater),
+            (Member::Unnamed(_), Member::Named(_)) => Some(Ordering::Less),
+            (Member::Unnamed(this), Member::Unnamed(other)) => this.index.partial_cmp(&other.index),
         }
     }
+}
+impl Ord for CaptureMember {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap_or(Ordering::Equal)
+    }
+}
+
+fn get_capture_field(i: &syn::Expr, locals: &Locals) -> Option<Capture> {
     match i {
-        Expr::Path(_) | Expr::Field(_) | Expr::Reference(_) => {
-            let mutability;
-            let inner_expr;
-            match i {
-                Expr::Reference(r) => {
-                    inner_expr = &*r.expr;
-                    mutability = if r.mutability.is_some() {
-                        CaptureMutability::Mutable
-                    } else {
-                        CaptureMutability::Immutable
-                    };
-                }
-                _ => {
-                    inner_expr = i;
-                    mutability = CaptureMutability::Unknown;
-                }
+        Expr::Path(p) if p.path.segments.len() == 1 => {
+            if let Some(syn::PathSegment {
+                arguments: syn::PathArguments::None,
+                ident,
+            }) = p.path.segments.first()
+            {
+                let s = ident.to_string();
+                (!s.chars().next().unwrap().is_ascii_uppercase() && !locals.contains(&ident)).then(
+                    || Capture {
+                        root: ident.to_owned(),
+                        members: Vec::new(),
+                    },
+                )
+            } else {
+                None
             }
-            let mut capt = get_capture_inner(inner_expr, locals)?;
-            capt.expr = Some(inner_expr.clone());
-            let out = Capture {
-                name: capt,
-                mutability,
-            };
-            Some(out)
         }
-        _ => None,
-    }
-}
-
-fn replace_capture(
-    i: &mut Expr,
-    locals: &Locals,
-    replacements: &HashMap<&CaptureName, u32>,
-    borrows_tuple_name: &Ident,
-) -> bool {
-    enum ReplaceResult {
-        NotFound,
-        Replacing(CaptureName),
-        Done,
-    }
-
-    fn replace_capture_inner(
-        i: &mut Expr,
-        locals: &Locals,
-        replacements: &HashMap<&CaptureName, u32>,
-        borrows_tuple_name: &Ident,
-    ) -> ReplaceResult {
-        let capt = match i {
-            Expr::Path(p) if p.path.segments.len() == 1 => {
-                if let Some(syn::PathSegment {
-                    arguments: syn::PathArguments::None,
-                    ident,
-                }) = p.path.segments.first()
-                {
-                    let s = ident.to_string();
-                    if !s.chars().next().unwrap().is_ascii_uppercase() && !locals.contains(&s) {
-                        CaptureName {
-                            ident: ident.to_string(),
-                            members: Vec::new(),
-                            expr: None,
-                        }
-                    } else {
-                        return ReplaceResult::NotFound;
-                    }
-                } else {
-                    return ReplaceResult::NotFound;
-                }
-            }
-            Expr::Field(f) => {
-                match replace_capture_inner(&mut *f.base, locals, replacements, borrows_tuple_name)
-                {
-                    ReplaceResult::Replacing(mut c) => {
-                        c.members.push(member_to_string(&f.member));
-                        c
-                    }
-                    x => return x,
-                }
-            }
-            _ => return ReplaceResult::NotFound,
-        };
-        if let Some(&member) = replacements.get(&capt) {
-            let member = syn::Member::Unnamed(syn::Index {
-                index: member,
-                span: Span::mixed_site(),
+        Expr::Field(f) => get_capture_field(i, locals).map(|mut c| {
+            c.members.push(CaptureMember {
+                member: f.member.to_owned(),
             });
-            *i = parse_quote!(( * #borrows_tuple_name . #member ));
-            ReplaceResult::Done
-        } else {
-            ReplaceResult::Replacing(capt)
-        }
-    }
-    match replace_capture_inner(i, locals, replacements, borrows_tuple_name) {
-        ReplaceResult::Done => true,
-        _ => false,
+            c
+        }),
+        _ => None,
     }
 }
 
 #[derive(Default)]
 struct Locals {
-    all: HashSet<String>,
-    stack: Vec<Vec<String>>,
+    all: HashSet<Ident>,
+    stack: Vec<Vec<Ident>>,
 }
 impl Locals {
     fn add(&mut self, pat: &syn::Pat) {
@@ -313,14 +205,14 @@ impl Locals {
             self.all.remove(&ident);
         }
     }
-    fn contains(&self, ident: &str) -> bool {
+    fn contains(&self, ident: &Ident) -> bool {
         self.all.contains(ident)
     }
 }
 impl<'ast> Visit<'ast> for Locals {
     fn visit_pat_ident(&mut self, i: &'ast syn::PatIdent) {
-        if self.all.insert(i.ident.to_string()) {
-            self.stack.last_mut().unwrap().push(i.ident.to_string());
+        if self.all.insert(i.ident.to_owned()) {
+            self.stack.last_mut().unwrap().push(i.ident.to_owned());
         }
     }
 }
@@ -328,78 +220,122 @@ impl<'ast> Visit<'ast> for Locals {
 /// A syn Visitor for finding all the variables that an async block captures.
 /// It needs to be aware of which variables are local to the async block,
 /// and which are captured from outside.
-struct CaptureVisitor<F> {
+struct CaptureFinder<'ast> {
     locals: Locals,
-    do_on_expr: F,
+    found: HashMap<Capture, (bool, Vec<&'ast syn::Expr>)>,
 }
 
-impl<F: FnMut(&mut Expr, &mut Locals) -> bool> VisitMut for CaptureVisitor<F> {
+impl<'ast> Visit<'ast> for CaptureFinder<'ast> {
     // Items cannot capture anything.
-    fn visit_item_mut(&mut self, _i: &mut syn::Item) {}
+    fn visit_item(&mut self, _i: &'ast syn::Item) {}
 
     // These expressions create new bindings.
-    fn visit_expr_if_mut(&mut self, i: &mut syn::ExprIf) {
-        if let Expr::Let(el) = &mut *i.cond {
-            self.visit_expr_mut(&mut el.expr);
+    fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
+        if let Expr::Let(el) = &*i.cond {
+            self.visit_expr(&el.expr);
             self.locals.push_stack();
             self.locals.add(&el.pat);
-            self.visit_block_mut(&mut i.then_branch);
+            self.visit_block(&i.then_branch);
             self.locals.pop_stack();
-            if let Some((_, eb)) = &mut i.else_branch {
-                self.visit_expr_mut(&mut *eb);
+            if let Some((_, eb)) = &i.else_branch {
+                self.visit_expr(&*eb);
             }
         } else {
-            syn::visit_mut::visit_expr_if_mut(self, i);
+            syn::visit::visit_expr_if(self, i);
         }
     }
-    fn visit_expr_while_mut(&mut self, i: &mut syn::ExprWhile) {
-        if let Expr::Let(el) = &mut *i.cond {
-            self.visit_expr_mut(&mut el.expr);
+    fn visit_expr_while(&mut self, i: &'ast syn::ExprWhile) {
+        if let Expr::Let(el) = &*i.cond {
+            self.visit_expr(&el.expr);
             self.locals.push_stack();
             self.locals.add(&el.pat);
-            self.visit_block_mut(&mut i.body);
+            self.visit_block(&i.body);
             self.locals.pop_stack();
         } else {
-            syn::visit_mut::visit_expr_while_mut(self, i);
+            syn::visit::visit_expr_while(self, i);
         }
     }
-    fn visit_expr_for_loop_mut(&mut self, i: &mut syn::ExprForLoop) {
-        self.visit_expr_mut(&mut i.expr);
+    fn visit_expr_for_loop(&mut self, i: &'ast syn::ExprForLoop) {
+        self.visit_expr(&i.expr);
         self.locals.push_stack();
         self.locals.add(&*i.pat);
-        self.visit_block_mut(&mut i.body);
+        self.visit_block(&i.body);
         self.locals.pop_stack();
     }
-    fn visit_arm_mut(&mut self, i: &mut syn::Arm) {
+    fn visit_arm(&mut self, i: &'ast syn::Arm) {
         self.locals.push_stack();
         self.locals.add(&i.pat);
-        if let Some((_, guard)) = &mut i.guard {
-            syn::visit_mut::visit_expr_mut(self, &mut *guard);
+        if let Some((_, guard)) = &i.guard {
+            syn::visit::visit_expr(self, &*guard);
         }
-        syn::visit_mut::visit_expr_mut(self, &mut i.body);
+        syn::visit::visit_expr(self, &i.body);
         self.locals.pop_stack();
     }
-    fn visit_expr_closure_mut(&mut self, i: &mut syn::ExprClosure) {
+    fn visit_expr_closure(&mut self, i: &'ast syn::ExprClosure) {
         self.locals.push_stack();
         i.inputs.iter().for_each(|arg| self.locals.add(arg));
-        self.visit_expr_mut(&mut *i.body);
+        self.visit_expr(&*i.body);
         self.locals.pop_stack();
     }
-    fn visit_local_mut(&mut self, i: &mut syn::Local) {
-        syn::visit_mut::visit_local_mut(self, i);
+    fn visit_local(&mut self, i: &'ast syn::Local) {
+        syn::visit::visit_local(self, i);
         self.locals.add(&i.pat);
     }
 
-    fn visit_block_mut(&mut self, i: &mut syn::Block) {
+    fn visit_block(&mut self, i: &'ast syn::Block) {
         self.locals.push_stack();
-        syn::visit_mut::visit_block_mut(self, i);
+        syn::visit::visit_block(self, i);
         self.locals.pop_stack();
     }
 
     // Find variable expressions that we need to modify.
+    fn visit_expr(&mut self, i: &'ast Expr) {
+        let (ex, immut) = match i {
+            Expr::Path(_) | Expr::Field(_) => (i, false),
+            Expr::Reference(r) => (&*r.expr, r.mutability.is_none()),
+            Expr::Call(c) => {
+                match &*c.func {
+                    Expr::Path(p) if p.path.segments.len() == 1 => {}
+                    _ => {
+                        syn::visit::visit_expr(self, &*c.func);
+                    }
+                }
+                c.args.iter().for_each(|arg| {
+                    syn::visit::visit_expr(self, arg);
+                });
+                return;
+            }
+            _ => {
+                syn::visit::visit_expr(self, i);
+                return;
+            }
+        };
+        if let Some(mut capt) = get_capture_field(ex, &self.locals) {
+            capt.members.reverse();
+            match self.found.entry(capt) {
+                std::collections::hash_map::Entry::Occupied(mut occ) => {
+                    occ.get_mut().0 &= immut;
+                    occ.get_mut().1.push(ex as _);
+                }
+                std::collections::hash_map::Entry::Vacant(vac) => {
+                    vac.insert((immut, vec![ex as _]));
+                }
+            }
+        } else {
+            syn::visit::visit_expr(self, i);
+        }
+    }
+}
+
+struct CaptureReplacer {
+    replacements: HashMap<*const syn::Expr, syn::Expr>,
+}
+
+impl VisitMut for CaptureReplacer {
     fn visit_expr_mut(&mut self, i: &mut Expr) {
-        if !(&mut self.do_on_expr)(i, &mut self.locals) {
-            syn::visit_mut::visit_expr_mut(self, i);
+        syn::visit_mut::visit_expr_mut(self, i);
+        if let Some(rep) = self.replacements.remove(&(i as _)) {
+            *i = rep;
         }
     }
 }

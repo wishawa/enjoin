@@ -10,7 +10,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use syn::{
     parse::Parse, parse_macro_input, parse_quote, punctuated::Punctuated, ExprBlock, Ident,
-    Lifetime, Token,
+     Token,
 };
 
 #[proc_macro]
@@ -109,22 +109,18 @@ impl MacroInput {
                 }
             }
         );
-        let br_lifetimes = replacer
+        let br_labels = replacer
             .found
             .iter()
             .filter_map(|(escape, _ident)| match escape {
-                Escape::Break(label) => {
-                    Some(Lifetime::new(&format!("'{}", label), Span::call_site()))
-                }
+                Escape::Break(label) =>Some(label),
                 _ => None,
             });
-        let co_lifetimes = replacer
+        let co_labels = replacer
             .found
             .iter()
             .filter_map(|(escape, _ident)| match escape {
-                Escape::Continue(label) => {
-                    Some(Lifetime::new(&format!("'{}", label), Span::call_site()))
-                }
+                Escape::Continue(label) => Some(label),
                 _ => None,
             });
 
@@ -179,8 +175,8 @@ impl MacroInput {
                 match #poller .await {
                     #output_type :: #keep_ty (e) => e,
                     #(#output_type :: #re_variants (e) => return e,)*
-                    #(#output_type :: #br_variants (e) => break #br_lifetimes e,)*
-                    #(#output_type :: #co_variants => continue #co_lifetimes,)*
+                    #(#output_type :: #br_variants (e) => break #br_labels e,)*
+                    #(#output_type :: #co_variants => continue #co_labels,)*
                 }
             }
         })

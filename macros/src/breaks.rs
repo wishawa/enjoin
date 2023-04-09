@@ -2,19 +2,22 @@ use std::collections::HashMap;
 
 use proc_macro2::Ident;
 use quote::format_ident;
-use syn::{parse_quote, visit_mut::VisitMut, Expr, ExprBlock};
+use syn::{parse_quote, visit_mut::VisitMut, Expr, ExprBlock, Lifetime};
 
 #[derive(PartialEq, Eq, Hash)]
 pub(crate) enum Escape {
-    Break(String),
-    Continue(String),
+    Break(Option<Lifetime>),
+    Continue(Option<Lifetime>),
     Return,
 }
+
 impl Escape {
     pub fn variant_name(&self, private_ident: &Ident) -> Ident {
         match self {
-            Escape::Break(la) => format_ident!("{}_Break_{}", private_ident, &**la),
-            Escape::Continue(la) => format_ident!("{}_Continue_{}", private_ident, &**la),
+            Escape::Break(Some(la)) => format_ident!("{}_Break_{}", private_ident, &la.ident),
+            Escape::Break(None) => format_ident!("{}_Break", private_ident),
+            Escape::Continue(Some(la)) => format_ident!("{}_Continue_{}", private_ident, &la.ident),
+            Escape::Continue(None) => format_ident!("{}_Continue", private_ident),
             Escape::Return => format_ident!("{}_Return", private_ident),
         }
     }
@@ -22,7 +25,7 @@ impl Escape {
 
 pub(crate) struct BreakReplacer<'a> {
     pub output_type: &'a Ident,
-    pub labels: Vec<String>,
+    pub labels: Vec<Ident>,
     pub loop_level: usize,
     pub found: HashMap<Escape, Ident>,
     pub private_ident: &'a Ident,
@@ -31,7 +34,7 @@ macro_rules! visit_opt_label_block {
     ($self:ident, $visitor_name:ident, $i:ident, $inc_loop:literal) => {
         $self.loop_level += $inc_loop;
         if let Some(label) = &$i.label {
-            $self.labels.push(label.name.ident.to_string());
+            $self.labels.push(label.name.ident.to_owned());
             syn::visit_mut::$visitor_name($self, $i);
             $self.labels.pop();
         } else {
@@ -61,24 +64,8 @@ impl<'a> VisitMut for BreakReplacer<'a> {
     fn visit_expr_mut(&mut self, i: &mut Expr) {
         syn::visit_mut::visit_expr_mut(self, i);
         let (esc, expr) = match i {
-            Expr::Break(br) => (
-                Escape::Break(
-                    br.label
-                        .as_ref()
-                        .map(|l| l.ident.to_string())
-                        .unwrap_or_default(),
-                ),
-                br.expr.as_ref(),
-            ),
-            Expr::Continue(co) => (
-                Escape::Continue(
-                    co.label
-                        .as_ref()
-                        .map(|l| l.ident.to_string())
-                        .unwrap_or_default(),
-                ),
-                None,
-            ),
+            Expr::Break(br) => (Escape::Break(br.label.to_owned()), br.expr.as_ref()),
+            Expr::Continue(co) => (Escape::Continue(co.label.to_owned()), None),
             Expr::Return(re) => (Escape::Return, re.expr.as_ref()),
             _ => return,
         };
