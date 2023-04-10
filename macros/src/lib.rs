@@ -13,9 +13,18 @@ use syn::{
 };
 
 #[proc_macro]
+pub fn join_auto_borrow(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let input = parse_macro_input!(input as MacroInput);
+    match input.generate(true) {
+        Ok(o) => o.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+#[proc_macro]
 pub fn join(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as MacroInput);
-    match input.generate() {
+    match input.generate(false) {
         Ok(o) => o.into(),
         Err(e) => e.to_compile_error().into(),
     }
@@ -31,16 +40,20 @@ impl Parse for MacroInput {
 }
 
 impl MacroInput {
-    fn generate(self) -> syn::Result<TokenStream> {
+    fn generate(self, make_borrows: bool) -> syn::Result<TokenStream> {
         let private_ident = Ident::new("__enjoin", Span::mixed_site());
         let borrows_tuple = format_ident!("{}_borrows", private_ident);
         let borrows_cell = format_ident!("{}_borrows_cell", private_ident);
         let Self(mut blocks) = self;
-        let borrows = captures::replace_captures_and_generate_borrows(
-            &mut blocks,
-            &borrows_tuple,
-            &borrows_cell,
-        );
+        let borrows = if make_borrows {
+            captures::replace_captures_and_generate_borrows(
+                &mut blocks,
+                &borrows_tuple,
+                &borrows_cell,
+            )
+        } else {
+            None
+        };
 
         let num = blocks.len();
         trys::desugar_trys(&mut blocks);
@@ -61,61 +74,79 @@ impl MacroInput {
         let all_breaks = replacer
             .found
             .iter()
-            .filter_map(|(escape, ident)| match escape {
-                Escape::Break(_label) => Some(ident.to_owned()),
+            .filter_map(|(escape, (ident, has_expr))| match escape {
+                Escape::Break(_label) => Some((ident.to_owned(), has_expr)),
                 _ => None,
             })
             .collect::<Vec<_>>();
 
-        let br_generics = all_breaks.iter().collect::<Vec<_>>();
-        let br_variants = &br_generics;
+        let br_variants_with_expr = all_breaks
+            .iter()
+            .filter_map(|(ident, has_expr)| if **has_expr { Some(ident) } else { None })
+            .collect::<Vec<_>>();
+        let br_variants_without_expr = all_breaks
+            .iter()
+            .filter_map(|(ident, has_expr)| if **has_expr { None } else { Some(ident) })
+            .collect::<Vec<_>>();
+
         let co_variants = replacer
             .found
             .iter()
-            .filter_map(|(escape, ident)| match escape {
+            .filter_map(|(escape, (ident, _))| match escape {
                 Escape::Continue(_label) => Some(ident),
                 _ => None,
             })
             .collect::<Vec<_>>();
 
-        let re_generics = replacer
+        let re_variants = replacer
             .found
             .iter()
-            .filter_map(|(escape, ident)| match escape {
+            .filter_map(|(escape, (ident, _))| match escape {
                 Escape::Return => Some(ident),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let re_variants = &re_generics;
 
         let convert_breaking_ty = format_ident!("{}_TargetType", private_ident);
         let keep_ty = format_ident!("{}_Keep", private_ident);
         let return_type = quote!(
-            enum #output_type <#(#br_generics,)* #(#re_generics,)* #keep_ty> {
+            enum #output_type <#(#br_variants_with_expr,)* #(#re_variants,)* #keep_ty> {
                 #keep_ty (#keep_ty),
-                #(#re_variants (#re_generics),)*
-                #(#br_variants (#br_generics),)*
-                #(#co_variants,)*
+                #(#re_variants (#re_variants),)*
+                #(#br_variants_with_expr (#br_variants_with_expr),)*
+                #(#br_variants_without_expr (()) ,)*
+                #(#co_variants (()),)*
             }
-            impl <#(#br_generics,)* #(#re_generics,)* #keep_ty> #output_type <#(#br_generics,)* #(#re_generics,)* #keep_ty> {
-                fn convert_breaking<#convert_breaking_ty>(self) -> ::core::ops::ControlFlow<#output_type <#(#br_generics,)* #(#re_generics,)* #convert_breaking_ty>, #keep_ty> {
+            impl <#(#br_variants_with_expr,)* #(#re_variants,)* #keep_ty> #output_type <#(#br_variants_with_expr,)* #(#re_variants,)* #keep_ty> {
+                fn convert_breaking<#convert_breaking_ty>(self) -> ::core::ops::ControlFlow<#output_type <#(#br_variants_with_expr,)* #(#re_variants,)* #convert_breaking_ty>, #keep_ty> {
                     match self {
                         Self :: #keep_ty (e) => ::core::ops::ControlFlow::Continue (e),
                         #(Self :: #re_variants (e) => ::core::ops::ControlFlow::Break (#output_type :: #re_variants (e) ),)*
-                        #(Self :: #br_variants (e) => ::core::ops::ControlFlow::Break (#output_type :: #br_variants (e) ),)*
-                        #(Self :: #co_variants => ::core::ops::ControlFlow::Break (#output_type :: #co_variants) ,)*
+                        #(Self :: #br_variants_with_expr (e) => ::core::ops::ControlFlow::Break (#output_type :: #br_variants_with_expr (e) ),)*
+                        #(Self :: #br_variants_without_expr (_) => ::core::ops::ControlFlow::Break (#output_type :: #br_variants_without_expr (()) ),)*
+                        #(Self :: #co_variants (_) => ::core::ops::ControlFlow::Break (#output_type :: #co_variants (())) ,)*
                     }
                 }
             }
         );
 
-        let br_labels = replacer
-            .found
-            .iter()
-            .filter_map(|(escape, _ident)| match escape {
-                Escape::Break(label) => Some(label),
-                _ => None,
-            });
+        let br_labels_with_expr =
+            replacer
+                .found
+                .iter()
+                .filter_map(|(escape, (_, has_expr))| match escape {
+                    Escape::Break(label) if *has_expr => Some(label),
+                    _ => None,
+                });
+        let br_labels_without_expr =
+            replacer
+                .found
+                .iter()
+                .filter_map(|(escape, (_, has_expr))| match escape {
+                    Escape::Break(label) if !*has_expr => Some(label),
+                    _ => None,
+                });
+
         let co_labels = replacer
             .found
             .iter()
@@ -175,8 +206,9 @@ impl MacroInput {
                 match #poller .await {
                     #output_type :: #keep_ty (e) => e,
                     #(#output_type :: #re_variants (e) => return e,)*
-                    #(#output_type :: #br_variants (e) => break #br_labels e,)*
-                    #(#output_type :: #co_variants => continue #co_labels,)*
+                    #(#output_type :: #br_variants_with_expr (e) => break #br_labels_with_expr e,)*
+                    #(#output_type :: #br_variants_without_expr (_) => break #br_labels_without_expr,)*
+                    #(#output_type :: #co_variants (_) => continue #co_labels,)*
                 }
             }
         })

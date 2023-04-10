@@ -1,13 +1,8 @@
 use core::future::Future;
 
-pub struct YieldOnce(bool);
-impl YieldOnce {
-    pub fn new() -> Self {
-        Self(false)
-    }
-}
+pub struct YieldFor(pub usize);
 
-impl Future for YieldOnce {
+impl Future for YieldFor {
     type Output = ();
 
     fn poll(
@@ -15,19 +10,12 @@ impl Future for YieldOnce {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
         let this = self.get_mut();
-        if this.0 {
+        if this.0 == 0 {
             std::task::Poll::Ready(())
         } else {
-            this.0 = true;
+            this.0 -= 1;
             cx.waker().wake_by_ref();
             std::task::Poll::Pending
         }
-    }
-}
-
-pub struct NotCopy(pub i32);
-impl NotCopy {
-    pub fn add(&mut self, other: i32) {
-        self.0 += other;
     }
 }

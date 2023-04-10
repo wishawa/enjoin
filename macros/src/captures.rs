@@ -1,12 +1,18 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    hash::Hash,
 };
 
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 use syn::{parse_quote, visit::Visit, visit_mut::VisitMut, Expr, ExprBlock, Member};
+
+struct CaptureInfo<'a> {
+    capture: Capture,
+    block_id: usize,
+    immutable: bool,
+    exprs: Vec<&'a syn::Expr>,
+}
 
 pub fn replace_captures_and_generate_borrows(
     blocks: &mut Vec<ExprBlock>,
@@ -19,85 +25,77 @@ pub fn replace_captures_and_generate_borrows(
         .map(|block| {
             let mut collector = CaptureFinder {
                 locals: Locals::default(),
-                found: HashMap::new(),
+                found: Vec::new(),
             };
             collector.visit_expr_block(block);
             collector.found
         })
         .collect::<Vec<_>>();
 
-    // Gather all the captured variables together.
-    let mut all_captures = block_captures.into_iter().fold(
-        HashMap::new(),
-        |mut h: HashMap<Capture, (bool, Vec<&syn::Expr>)>, item| {
-            item.into_iter()
-                .for_each(|(name, (immutable, locations))| match h.entry(name) {
-                    std::collections::hash_map::Entry::Occupied(mut occ) => {
-                        occ.get_mut().0 &= immutable;
-                        occ.get_mut().1.extend(locations);
-                    }
-                    std::collections::hash_map::Entry::Vacant(vac) => {
-                        vac.insert((immutable, locations));
-                    }
-                });
-            h
-        },
-    );
-
-    // Filter for ones that are captured by at least 2 blocks and not known to be immutable.
-    // These are the ones we need to wrap in cells.
-    all_captures.retain(|_, (immutable, all_locations)| !*immutable && all_locations.len() > 1);
-
-    let mut names = Vec::new();
-    let mut all_captures = all_captures
-        .iter_mut()
-        .map(|(capt, (_imm, locs))| {
-            names.push(capt);
-            (capt, core::mem::take(locs))
+    // Collect the results into one long vector.
+    let mut all_captures = block_captures
+        .into_iter()
+        .enumerate()
+        .flat_map(|(block_id, captures)| {
+            captures
+                .into_iter()
+                .map(move |(capture, immutable, expr)| CaptureInfo {
+                    capture,
+                    block_id,
+                    immutable,
+                    exprs: vec![expr],
+                })
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<Vec<_>>();
 
-    names.sort();
-    let mut temp_buf = Vec::new();
-    for sp in (1..names.len()).rev() {
-        let (anc, des) = names.split_at(sp);
-        let anc = anc.last().unwrap();
-        let dsc = des.first().unwrap();
-        if dsc.root == anc.root && dsc.members.starts_with(&anc.members) {
-            let depth_dif = dsc.members.len() - anc.members.len();
-            temp_buf.extend(
-                all_captures
-                    .remove(*dsc)
-                    .unwrap()
-                    .into_iter()
-                    .map(|ex| access_field(ex, depth_dif)),
-            );
-            all_captures
-                .get_mut(*anc)
-                .unwrap()
-                .extend(temp_buf.drain(..));
-            names.swap_remove(sp);
+    // Sort it so that captures with ancestor/descendent relationship appear sequentially.
+    all_captures.sort_by(|a, b| a.capture.cmp(&b.capture));
+
+    if all_captures.is_empty() {
+        return None;
+    }
+
+    let mut all_captures = all_captures.into_iter();
+    let mut captures = vec![all_captures.next().unwrap()];
+
+    for dsc in all_captures {
+        let anc = captures.last_mut().unwrap();
+        if anc.capture.root == dsc.capture.root
+            && dsc.capture.members.starts_with(&anc.capture.members)
+        {
+            let depth_dif = dsc.capture.members.len() - anc.capture.members.len();
+            if dsc.block_id != anc.block_id {
+                anc.block_id = usize::MAX;
+            }
+            anc.exprs
+                .extend(dsc.exprs.into_iter().map(|ex| access_field(ex, depth_dif)));
+            anc.immutable &= dsc.immutable;
+        } else {
+            captures.push(dsc);
         }
     }
 
-    let all_captures = all_captures.into_iter().collect::<Vec<_>>();
+    // Filter for ones that are captured by at least 2 blocks and not known to be immutable.
+    // These are the ones we need to wrap in cells.
+    captures.retain(|info| info.block_id == usize::MAX && !info.immutable);
 
-    let borrows = all_captures
-        .iter()
-        .map(|(Capture { root, members }, _locs)| {
-            let members = members.iter().map(|m| &m.member);
-            let b: syn::Expr = parse_quote!( #root #( . #members )* );
-            b
-        });
+    // Create the expressions for the captures that need to be wrapped.
+    let borrows = captures.iter().map(|info| {
+        let root = &info.capture.root;
+        let members = info.capture.members.iter().map(|m| &m.member);
+        let b: syn::Expr = parse_quote!( #root #( . #members )* );
+        b
+    });
 
-    let replacements = all_captures
+    // Create the expression with which we will replace the captured occurences in the async blocks.
+    let replacements = captures
         .iter()
         .enumerate()
-        .flat_map(|(idx, (_capt, locs))| {
+        .flat_map(|(idx, info)| {
             let index = syn::Index::from(idx);
-            locs.iter().map(move |&loc| {
+            info.exprs.iter().map(move |&expr| {
                 (
-                    loc as *const syn::Expr as usize,
+                    expr as *const syn::Expr,
                     parse_quote!( (* #borrows_tuple_name . #index) ),
                 )
             })
@@ -106,7 +104,8 @@ pub fn replace_captures_and_generate_borrows(
 
     let mut replacer = CaptureReplacer { replacements };
 
-    if !names.is_empty() {
+    // Generate code for building the RefCell.
+    if !captures.is_empty() {
         let out = quote!(
             let #borrows_cell_name = ::std::cell::RefCell::new((
                 #(&mut #borrows ,)*
@@ -132,13 +131,13 @@ fn access_field(ex: &syn::Expr, depth: usize) -> &syn::Expr {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Capture {
     root: Ident,
     members: Vec<CaptureMember>,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq)]
 struct CaptureMember {
     member: Member,
 }
@@ -222,7 +221,7 @@ impl<'ast> Visit<'ast> for Locals {
 /// and which are captured from outside.
 struct CaptureFinder<'ast> {
     locals: Locals,
-    found: HashMap<Capture, (bool, Vec<&'ast syn::Expr>)>,
+    found: Vec<(Capture, bool, &'ast syn::Expr)>,
 }
 
 impl<'ast> Visit<'ast> for CaptureFinder<'ast> {
@@ -311,15 +310,7 @@ impl<'ast> Visit<'ast> for CaptureFinder<'ast> {
             }
         };
         if let Some(capt) = get_capture_field(ex, &self.locals) {
-            match self.found.entry(capt) {
-                std::collections::hash_map::Entry::Occupied(mut occ) => {
-                    occ.get_mut().0 &= immut;
-                    occ.get_mut().1.push(ex as _);
-                }
-                std::collections::hash_map::Entry::Vacant(vac) => {
-                    vac.insert((immut, vec![ex as _]));
-                }
-            }
+            self.found.push((capt, immut, ex));
         } else {
             syn::visit::visit_expr(self, i);
         }
@@ -327,13 +318,13 @@ impl<'ast> Visit<'ast> for CaptureFinder<'ast> {
 }
 
 struct CaptureReplacer {
-    replacements: HashMap<usize, syn::Expr>,
+    replacements: HashMap<*const syn::Expr, syn::Expr>,
 }
 
 impl VisitMut for CaptureReplacer {
     fn visit_expr_mut(&mut self, i: &mut Expr) {
         syn::visit_mut::visit_expr_mut(self, i);
-        if let Some(rep) = self.replacements.remove(&(i as *const _ as usize)) {
+        if let Some(rep) = self.replacements.remove(&(i as *const _)) {
             *i = rep;
         }
     }

@@ -27,7 +27,7 @@ pub(crate) struct BreakReplacer<'a> {
     pub output_type: &'a Ident,
     pub labels: Vec<Ident>,
     pub loop_level: usize,
-    pub found: HashMap<Escape, Ident>,
+    pub found: HashMap<Escape, (Ident, bool)>,
     pub private_ident: &'a Ident,
 }
 macro_rules! visit_opt_label_block {
@@ -64,21 +64,29 @@ impl<'a> VisitMut for BreakReplacer<'a> {
     fn visit_expr_mut(&mut self, i: &mut Expr) {
         syn::visit_mut::visit_expr_mut(self, i);
         let (esc, expr) = match i {
-            Expr::Break(br) => (Escape::Break(br.label.to_owned()), br.expr.as_ref()),
-            Expr::Continue(co) => (Escape::Continue(co.label.to_owned()), None),
+            Expr::Break(br) => match &br.label {
+                None if self.loop_level > 0 => return,
+                Some(l) if self.labels.contains(&l.ident) => return,
+                _ => (Escape::Break(br.label.to_owned()), br.expr.as_ref()),
+            },
+            Expr::Continue(co) => match &co.label {
+                None if self.loop_level > 0 => return,
+                Some(l) if self.labels.contains(&l.ident) => return,
+                _ => (Escape::Continue(co.label.to_owned()), None),
+            },
             Expr::Return(re) => (Escape::Return, re.expr.as_ref()),
             _ => return,
         };
-        let variant_name = match self.found.entry(esc) {
+        let (variant_name, _) = match self.found.entry(esc) {
             std::collections::hash_map::Entry::Occupied(occ) => occ.into_mut(),
             std::collections::hash_map::Entry::Vacant(vac) => {
                 let name = vac.key().variant_name(&self.private_ident);
-                vac.insert(name)
+                vac.insert((name, expr.is_some()))
             }
         };
 
         let out_type = self.output_type;
         let expr = expr.into_iter();
-        *i = parse_quote!( return #out_type :: #variant_name ( #(#expr)* ) );
+        *i = parse_quote!( return #out_type :: #variant_name ( (#(#expr)*) ) );
     }
 }

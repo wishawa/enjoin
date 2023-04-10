@@ -1,4 +1,4 @@
-pub use enjoin_macro::join;
+pub use enjoin_macro::{join, join_auto_borrow};
 
 pub mod for_macro_only {}
 
