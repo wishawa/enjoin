@@ -46,3 +46,16 @@ async fn join_3() {
     assert_eq!(o2, "lol");
     assert_eq!(o3, vec![1, 2, 3]);
 }
+
+#[pollster::test]
+async fn break_block() {
+    let (o,) = enjoin::join!('bl: {
+        for i in 0..10 {
+            if i > 3 {
+                break 'bl 3;
+            }
+        }
+        100
+    });
+    assert_eq!(o, 3);
+}
