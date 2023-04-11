@@ -3,7 +3,6 @@ use utils::YieldFor;
 
 #[pollster::test]
 async fn race() {
-    #[allow(unreachable_code)]
     let res = 'race: {
         enjoin::join!(
             {

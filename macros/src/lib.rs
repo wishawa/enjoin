@@ -199,7 +199,13 @@ impl MacroInput {
                 #borrows
                 #return_type
                 let mut #pinned_futs = (
-                    #(::core::pin::pin!(async { #output_type :: #keep_ty (#blocks) }),)*
+                    #(::core::pin::pin!(async {
+                        #[allow(unreachable_code)]
+                        #output_type :: #keep_ty (
+                            #[warn(unreachable_code)]
+                            #blocks
+                        )
+                    }),)*
                 );
                 let mut #num_left = #num;
                 let mut #outputs = (#(#nones,)*);
