@@ -2,8 +2,10 @@
 name = "enjoin"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "Powerful syntax-level async join macro"
+license = "MPL-2.0"
+repository = "https://github.com/wishawa/enjoin"
+categories = ["asynchronous", "rust-patterns"]
 
 [dependencies]
 enjoin_macro = { version = "0.1", path = "./macros/" }
