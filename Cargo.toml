@@ -1,14 +1,15 @@
 [package]
 name = "enjoin"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Powerful syntax-level async join macro"
 license = "MPL-2.0"
 repository = "https://github.com/wishawa/enjoin"
+documentation = "https://docs.rs/enjoin"
 categories = ["asynchronous", "rust-patterns"]
 
 [dependencies]
-enjoin_macro = { version = "0.1", path = "./macros/" }
+enjoin_macro = { version = "0.2", path = "./macros/" }
 
 [dev-dependencies]
 pollster = { version = "0.3.0", features = ["macro"] }

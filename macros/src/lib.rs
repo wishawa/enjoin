@@ -12,19 +12,25 @@ use syn::{
     parse::Parse, parse_macro_input, parse_quote, punctuated::Punctuated, ExprBlock, Ident, Token,
 };
 
+/// Run given blocks of async code concurrently.
+/// Use `break`/`continue`/`return`/`?` to jump out.
+/// See the [crate documentation](https://docs.rs/enjoin/latest/enjoin/).
 #[proc_macro]
-pub fn join_auto_borrow(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+pub fn join(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as MacroInput);
-    match input.generate(true) {
+    match input.generate(false) {
         Ok(o) => o.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
+/// Everything [join!] does,
+/// plus the automatic shared mutable borrowing described in the
+/// [crate documentation](https://docs.rs/enjoin/latest/enjoin/).
 #[proc_macro]
-pub fn join(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+pub fn join_auto_borrow(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as MacroInput);
-    match input.generate(false) {
+    match input.generate(true) {
         Ok(o) => o.into(),
         Err(e) => e.to_compile_error().into(),
     }

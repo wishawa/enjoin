@@ -1,5 +1,8 @@
 # enjoin
 
+[<img alt="on crates.io" src="https://img.shields.io/crates/v/enjoin?style=for-the-badge" height="20">](https://crates.io/crates/enjoin)
+[<img alt="on docs.rs" src="https://img.shields.io/docsrs/enjoin?style=for-the-badge" height="20">](https://docs.rs/enjoin)
+
 **enjoin**'s async join macros operate at the syntax level. It allows you to...
 
 ### `break`, `continue`, and `return` out of async code running in a join
@@ -53,3 +56,6 @@ enjoin::join_auto_borrow!(
     }
 );
 ```
+
+See my blog post [here](https://wishawa.github.io/posts/enjoin)
+for motivations, working mechanism, comparison to other join macros, and more.
