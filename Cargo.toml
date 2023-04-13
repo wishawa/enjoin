@@ -17,5 +17,6 @@ pollster = { version = "0.3.0", features = ["macro"] }
 [workspace]
 members = [
 	"macros/",
-	"tests/compile-fail-tests/"
+	"tests/compile-fail-tests/",
+	"external_tests/"
 ]
