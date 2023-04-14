@@ -82,3 +82,25 @@ async fn unlabeled_break_shadowed() {
     }
     assert_eq!(x, 20);
 }
+
+#[pollster::test]
+async fn break_block() {
+    let (o,) = enjoin::join!('bl: {
+        for i in 0..10 {
+            if i > 3 {
+                break 'bl 3;
+            }
+        }
+        100
+    });
+    assert_eq!(o, 3);
+}
+
+#[pollster::test]
+async fn simple_break() {
+    loop {
+        enjoin::join!({
+            break;
+        });
+    }
+}
