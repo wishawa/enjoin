@@ -10,6 +10,7 @@ async fn sample_expansion() {
     async fn inner() -> Option<&'static str> {
         let mut done = 0;
         'a: {
+            #[allow(warnings)]
             {
                 let __enjoin_borrows_cell = ::std::cell::RefCell::new((&mut done,));
                 enum __enjoin_OutputEnum<__enjoin_Return, __enjoin_Keep> {
