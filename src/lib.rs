@@ -172,6 +172,8 @@
 //!     You can help the macro by writing `(&mut var).method()` or
 //!     `(&var).method()` instead of `var.method()`.
 //!
+//! ## Sample expansion
+//! See [here](https://github.com/wishawa/enjoin/blob/main/tests/sample_expansion.rs).
 pub use enjoin_macro::{join, join_auto_borrow};
 
 pub mod polyfill {
